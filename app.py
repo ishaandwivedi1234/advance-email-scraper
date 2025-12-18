@@ -87,8 +87,19 @@ def inject_css() -> None:
                 border-radius: 999px;
                 background: rgba(99,102,241,0.15);
                 color: #c7d2fe;
-                margin-right: 8px;
+                margin: 4px 8px 4px 0;
                 font-size: 0.85rem;
+            }
+            .subhead {
+                margin-top: 6px;
+                color: #c7d2fe;
+                font-size: 1rem;
+            }
+            .footer {
+                margin-top: 18px;
+                text-align: center;
+                color: #9ca3af;
+                font-size: 0.95rem;
             }
             .email-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
             .email-table th, .email-table td { border: 1px solid #1f2937; padding: 10px; }
@@ -251,14 +262,15 @@ def build_copy_table(df: pd.DataFrame) -> str:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Email Scraper", page_icon="📧", layout="wide")
+    st.set_page_config(page_title="Email Khoj", page_icon="📧", layout="wide")
     inject_css()
 
     st.markdown(
         """
         <div class="hero">
-            <h1>📧 Email Scraper</h1>
-            <p>Depth-controlled crawler with live results, copy buttons, and CSV export — stays on the same domain.</p>
+            <h1>📧 Email Khoj</h1>
+            <div class="subhead">Made with ❤️ by Ishaan</div>
+            <p>Depth-controlled email crawler with live results, copy buttons, and CSV export — stays on the same domain.</p>
             <div>
                 <span class="pill">Depth up to 4</span>
                 <span class="pill">Max 1024 pages</span>
@@ -353,6 +365,13 @@ def main() -> None:
     )
     if not latest_result.emails:
         st.warning("No emails found. Try another site or increase max pages.")
+
+    st.markdown(
+        """
+        <div class="footer">Made with ❤️ by Ishaan Dwivedi</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
