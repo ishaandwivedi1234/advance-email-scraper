@@ -123,46 +123,71 @@ def _get_playwright_context(user_agent: str):
     return pw, browser, context
 
 
-def fetch_playwright(url: str, *, timeout_ms: int, user_agent: str) -> Tuple[str, int]:
+def fetch_playwright(
+    url: str, *, timeout_ms: int, user_agent: str, retries: int = 1
+) -> Tuple[str, int]:
     start = time.perf_counter()
     logger.info("BROWSE %s (ua=%s)", url, user_agent or "-")
 
     _, _, context = _get_playwright_context(user_agent)
-    page = context.new_page()
-    try:
-        # Some pages keep background network requests open (analytics/chat widgets),
-        # so waiting for "networkidle" can hang. Instead, wait for "load" and then
-        # opportunistically wait for common content markers.
-        resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        page.wait_for_load_state("load", timeout=timeout_ms)
-        try:
-            # If contact info is injected late, this helps without relying on network-idle.
-            page.wait_for_selector('a[href^="mailto:"]', timeout=min(5000, timeout_ms))
-        except Exception:
-            pass
-        html = page.content()
-        status = resp.status if resp is not None else 0
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
+    retries = max(0, int(retries))
+    last_exc: Optional[BaseException] = None
 
-        # Cloudflare challenge pages commonly have this title.
-        if "Just a moment" in html[:2000]:
-            logger.warning(
-                "Cloudflare challenge page detected for %s. This may require human verification / CAPTCHA.",
-                url,
+    for attempt in range(retries + 1):
+        page = context.new_page()
+        try:
+            # Avoid waiting for "networkidle" on widget-heavy pages; it can hang.
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            # "load" may still timeout on pages with heavy resources; don't fail hard.
+            try:
+                page.wait_for_load_state("load", timeout=min(timeout_ms, 12_000))
+            except Exception:
+                pass
+            # Give the DOM a moment to settle (JS often injects content post-load).
+            try:
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
+            # Opportunistically wait for mailto links if they appear quickly.
+            try:
+                page.wait_for_selector('a[href^="mailto:"]', timeout=min(2500, timeout_ms))
+            except Exception:
+                pass
+
+            html = page.content()
+            status = resp.status if resp is not None else 0
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+            if "Just a moment" in html[:2000]:
+                logger.warning(
+                    "Cloudflare challenge page detected for %s. This may require human verification / CAPTCHA.",
+                    url,
+                )
+
+            logger.info(
+                "BROWSE %s -> %s (%.0fms, %s chars)", url, status, elapsed_ms, len(html)
             )
+            _log_scraped_html(url, html)
 
-        logger.info(
-            "BROWSE %s -> %s (%.0fms, %s chars)", url, status, elapsed_ms, len(html)
-        )
-        _log_scraped_html(url, html)
-        if status >= 400 and status != 0:
-            raise requests.HTTPError(f"{status} from browser navigation")
-        return html, status
-    finally:
-        try:
-            page.close()
-        except Exception:
-            pass
+            # If we got meaningful HTML, treat it as success even if status is 0
+            # (Playwright may return no response for some navigations).
+            if not html:
+                raise RuntimeError("Empty HTML from browser navigation")
+            if status >= 400 and status != 0:
+                raise requests.HTTPError(f"{status} from browser navigation")
+            return html, status
+        except Exception as e:
+            last_exc = e
+            if attempt >= retries:
+                raise
+            time.sleep(0.5 * (2**attempt))
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    raise RuntimeError(f"BROWSE failed for {url}: {last_exc!r}")
 
 
 @dataclass
@@ -714,6 +739,15 @@ def main() -> None:
             help="Browser mode can handle JavaScript challenges, but may still be blocked by CAPTCHA.",
             disabled=is_scraping,
         )
+        playwright_timeout_ms = st.number_input(
+            "Browser timeout (ms)",
+            min_value=5_000,
+            max_value=120_000,
+            value=30_000,
+            step=5_000,
+            help="Only used for Browser (Playwright) mode. Increase if pages sometimes fail to load.",
+            disabled=is_scraping,
+        )
         st.caption(
             "Some sites return 403 (Forbidden) to non-browser clients. Only scrape where you have permission."
         )
@@ -884,13 +918,13 @@ def main() -> None:
     }
 
     request_headers = {"User-Agent": user_agent.strip()} if user_agent.strip() else {}
-    timeout_ms = 15_000
+    timeout_ms = int(playwright_timeout_ms)
 
     fetch_fn = None
     if fetch_mode == "Browser (Playwright)":
         try:
             fetch_fn = lambda u: fetch_playwright(  # noqa: E731
-                u, timeout_ms=timeout_ms, user_agent=user_agent.strip()
+                u, timeout_ms=timeout_ms, user_agent=user_agent.strip(), retries=1
             )
         except Exception as e:
             st.error(str(e))
