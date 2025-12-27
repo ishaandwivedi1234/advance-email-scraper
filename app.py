@@ -981,12 +981,25 @@ def main() -> None:
     if latest_result is None:
         status.update(label="No pages visited. Check the URL and try again.", state="error")
         if first_fetch_error:
-            st.error(
-                f"No pages could be visited because the first fetch failed:\n\n"
-                f"- URL: {first_fetch_error.get('url','')}\n"
-                f"- Error: {first_fetch_error.get('error','')}\n\n"
-                f"Try switching **Fetch mode** to **Browser (Playwright)**, or retry in a minute (some sites rate-limit/bot-block intermittently)."
-            )
+            err = first_fetch_error.get("error", "")
+            url0 = first_fetch_error.get("url", "")
+            if "Executable doesn't exist" in err and "playwright install" in err:
+                st.error(
+                    "Playwright browser binaries are missing in this environment.\n\n"
+                    f"- URL: {url0}\n"
+                    f"- Error: {err}\n\n"
+                    "Fix:\n"
+                    "- Locally: run `python -m playwright install chromium`\n"
+                    "- Streamlit Community Cloud: add a `postBuild` file that runs "
+                    "`python -m playwright install chromium` (this repo now includes it)."
+                )
+            else:
+                st.error(
+                    f"No pages could be visited because the first fetch failed:\n\n"
+                    f"- URL: {url0}\n"
+                    f"- Error: {err}\n\n"
+                    f"Try switching **Fetch mode** to **Browser (Playwright)**, or retry in a minute (some sites rate-limit/bot-block intermittently)."
+                )
         else:
             st.warning("No pages could be visited.")
         st.session_state.scraping = False

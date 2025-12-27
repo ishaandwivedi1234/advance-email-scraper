@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -e
+
+# Ensure Playwright browser binaries are available (required for "Browser (Playwright)" mode).
+python -m playwright install chromium
+
+
