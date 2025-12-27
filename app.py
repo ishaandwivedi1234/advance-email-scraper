@@ -313,7 +313,10 @@ def inject_css() -> None:
             }
             .copy-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(6,182,212,0.35); }
             .copy-btn:active { transform: translateY(0); }
-            [data-testid="stSidebar"] { background: rgba(17,24,39,0.6); }
+            /* Make sidebar fully opaque so content behind it doesn't show through */
+            [data-testid="stSidebar"] { background: #0b1221 !important; }
+            /* Streamlit sometimes applies background on an inner container */
+            [data-testid="stSidebar"] > div { background: #0b1221 !important; }
             div[data-testid="stForm"] {
                 margin: 12px 0 18px 0;
                 padding: 16px 18px;
@@ -628,10 +631,14 @@ def main() -> None:
     with st.sidebar:
         st.subheader("Request settings")
         ua_labels = list(USER_AGENT_PRESETS.keys()) + ["Custom…"]
+        default_ua_label = "Chrome (macOS)"
+        default_ua_index = (
+            ua_labels.index(default_ua_label) if default_ua_label in ua_labels else 0
+        )
         ua_choice = st.selectbox(
             "User-Agent",
             options=ua_labels,
-            index=0,
+            index=default_ua_index,
             help="Pick a User-Agent string to send with requests. Some sites block obvious bots.",
             disabled=is_scraping,
         )
