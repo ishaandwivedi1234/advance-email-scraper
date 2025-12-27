@@ -339,6 +339,7 @@ def fetch(
     timeout: int = 8,
     headers: Optional[Mapping[str, str]] = None,
     session: Optional[requests.Session] = None,
+    retries: int = 2,
 ) -> Tuple[str, int]:
     start = time.perf_counter()
     merged_headers = dict(DEFAULT_HEADERS)
@@ -346,44 +347,73 @@ def fetch(
         merged_headers.update(dict(headers))
     ua = merged_headers.get("User-Agent", "-")
     logger.info("GET %s (ua=%s)", url, ua)
-    try:
-        if session is not None:
-            # Session keeps cookies across requests (some sites require it).
-            session.headers.update(merged_headers)
-            resp = session.get(url, timeout=timeout)
-        else:
-            resp = requests.get(url, timeout=timeout, headers=merged_headers)
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        logger.info(
-            "GET %s -> %s (%.0fms, %s bytes)",
-            url,
-            resp.status_code,
-            elapsed_ms,
-            len(resp.content or b""),
-        )
-        resp.raise_for_status()
-        _log_scraped_html(url, resp.text or "")
-        return resp.text, resp.status_code
-    except requests.HTTPError as e:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        resp = getattr(e, "response", None)
-        if resp is not None:
-            info = _summarize_blocking_headers(resp.headers)
-            snippet = (resp.text or "")[:280].replace("\n", " ").replace("\r", " ")
-            logger.error(
-                "Blocked? %s -> %s (%.0fms). headers=%s. body_snip=%r",
+
+    last_exc: Optional[BaseException] = None
+    retries = max(0, int(retries))
+    for attempt in range(retries + 1):
+        try:
+            if session is not None:
+                # Session keeps cookies across requests (some sites require it).
+                session.headers.update(merged_headers)
+                resp = session.get(url, timeout=timeout)
+            else:
+                resp = requests.get(url, timeout=timeout, headers=merged_headers)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            logger.info(
+                "GET %s -> %s (%.0fms, %s bytes)",
                 url,
                 resp.status_code,
                 elapsed_ms,
-                info,
-                snippet,
+                len(resp.content or b""),
             )
-        logger.exception("GET %s failed (%.0fms)", url, elapsed_ms)
-        raise
-    except Exception:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        logger.exception("GET %s failed (%.0fms)", url, elapsed_ms)
-        raise
+
+            # Retry certain transient HTTP failures.
+            if resp.status_code in (429, 500, 502, 503, 504):
+                raise requests.HTTPError(
+                    f"{resp.status_code} transient error",
+                    response=resp,
+                )
+
+            resp.raise_for_status()
+            _log_scraped_html(url, resp.text or "")
+            return resp.text, resp.status_code
+        except requests.HTTPError as e:
+            last_exc = e
+            resp = getattr(e, "response", None)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            if resp is not None:
+                info = _summarize_blocking_headers(resp.headers)
+                snippet = (resp.text or "")[:280].replace("\n", " ").replace("\r", " ")
+                logger.error(
+                    "HTTP error %s -> %s (%.0fms). headers=%s. body_snip=%r",
+                    url,
+                    resp.status_code,
+                    elapsed_ms,
+                    info,
+                    snippet,
+                )
+                # Do not retry hard blocks.
+                if resp.status_code in (401, 403, 404):
+                    raise
+            if attempt >= retries:
+                logger.exception("GET %s failed (%.0fms)", url, elapsed_ms)
+                raise
+            time.sleep(0.5 * (2**attempt))
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            if attempt >= retries:
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                logger.exception("GET %s failed (%.0fms)", url, elapsed_ms)
+                raise
+            time.sleep(0.5 * (2**attempt))
+        except Exception as e:
+            last_exc = e
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            logger.exception("GET %s failed (%.0fms)", url, elapsed_ms)
+            raise
+
+    # Should be unreachable, but keeps type-checkers happy.
+    raise RuntimeError(f"GET failed for {url}: {last_exc!r}")
 
 
 def crawl(
@@ -394,6 +424,7 @@ def crawl(
     fetch_fn: Optional[callable] = None,
     only_crawl_if_url_contains: str = "",
     prioritize_urls_containing: str = "",
+    on_fetch_error: Optional[callable] = None,
 ) -> CrawlResult:
     start_url = normalize_url(start_url)
     session = make_session(headers=headers)
@@ -413,7 +444,12 @@ def crawl(
                 html, _ = fetch_fn(url)
             else:
                 html, _ = fetch(url, headers=headers, session=session)
-        except Exception:
+        except Exception as e:
+            if on_fetch_error is not None:
+                try:
+                    on_fetch_error(url, e)
+                except Exception:
+                    pass
             logger.warning("Skipping %s (fetch failed)", url)
             continue  # skip pages that fail to load
 
@@ -447,6 +483,7 @@ def crawl_stream(
     fetch_fn: Optional[callable] = None,
     only_crawl_if_url_contains: str = "",
     prioritize_urls_containing: str = "",
+    on_fetch_error: Optional[callable] = None,
 ):  # yields progressive results
     start_url = normalize_url(start_url)
     session = make_session(headers=headers)
@@ -466,7 +503,12 @@ def crawl_stream(
                 html, _ = fetch_fn(url)
             else:
                 html, _ = fetch(url, headers=headers, session=session)
-        except Exception:
+        except Exception as e:
+            if on_fetch_error is not None:
+                try:
+                    on_fetch_error(url, e)
+                except Exception:
+                    pass
             logger.warning("Skipping %s (fetch failed)", url)
             continue  # skip pages that fail to load
 
@@ -854,6 +896,15 @@ def main() -> None:
             st.error(str(e))
             return
 
+    first_fetch_error: Dict[str, str] = {}
+
+    def _on_fetch_error(u: str, e: BaseException) -> None:
+        # Capture only the first error to explain "No pages visited".
+        if first_fetch_error:
+            return
+        first_fetch_error["url"] = u
+        first_fetch_error["error"] = f"{type(e).__name__}: {e}"
+
     # If we already have a partial result (e.g. rerun due to Stop click or other rerun),
     # render it immediately so the table doesn't "disappear" during reruns.
     if st.session_state.latest_result is not None:
@@ -872,6 +923,7 @@ def main() -> None:
             fetch_fn=fetch_fn,
             only_crawl_if_url_contains=crawl_only_contains,
             prioritize_urls_containing=crawl_prioritize_contains,
+            on_fetch_error=_on_fetch_error,
         ),
         start=1,
     ):
@@ -894,7 +946,15 @@ def main() -> None:
 
     if latest_result is None:
         status.update(label="No pages visited. Check the URL and try again.", state="error")
-        st.warning("No pages could be visited.")
+        if first_fetch_error:
+            st.error(
+                f"No pages could be visited because the first fetch failed:\n\n"
+                f"- URL: {first_fetch_error.get('url','')}\n"
+                f"- Error: {first_fetch_error.get('error','')}\n\n"
+                f"Try switching **Fetch mode** to **Browser (Playwright)**, or retry in a minute (some sites rate-limit/bot-block intermittently)."
+            )
+        else:
+            st.warning("No pages could be visited.")
         st.session_state.scraping = False
         st.session_state.stop_requested = False
         return
