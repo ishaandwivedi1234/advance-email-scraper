@@ -8,6 +8,10 @@ Scrapes emails from a given URL (level 1) and from pages linked on the same doma
    ```bash
    pip install -r requirements.txt
    ```
+3. (Optional, only if you use **Browser (Playwright)** mode) Install the Chromium browser:
+   ```bash
+   python -m playwright install chromium
+   ```
 3. Run:
    ```bash
    streamlit run app.py
@@ -24,4 +28,5 @@ Scrapes emails from a given URL (level 1) and from pages linked on the same doma
 - Depth is fixed to 2: the provided page plus its same-domain links.
 - Scraper skips pages that error or timeout (8s). Max pages default: 40.
 - Copy buttons rely on the browser clipboard API.
+- Some sites (e.g. Cloudflare “Just a moment…”) block normal HTTP clients. Try **Fetch mode → Browser (Playwright)** in the sidebar if you have permission to scrape.
 
